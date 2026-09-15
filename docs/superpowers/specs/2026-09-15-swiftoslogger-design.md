@@ -297,7 +297,7 @@ Each line starts with `# `, which makes the header easy to skip and to identify:
 
 ```
 # ==================== SwiftOSLogger Log File ====================
-# Logger:          SwiftOSLogger 1.0.0
+# Logger:          SwiftOSLogger 1.1.0
 # Application:     MyApp
 # Bundle ID:       com.acme.myapp
 # App Version:     2.3.1 (145)

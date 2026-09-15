@@ -23,7 +23,7 @@ In Xcode choose **File › Add Package Dependencies…** and enter `https://gith
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/tapanshah1/OSlogger.git", from: "1.0.0"),
+    .package(url: "https://github.com/tapanshah1/OSlogger.git", from: "1.1.0"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [.product(name: "SwiftOSLogger", package: "OSlogger")]),
@@ -208,7 +208,7 @@ A single entry is always accepted when nothing else is waiting, however large it
 
 ```
 # ==================== SwiftOSLogger Log File ====================
-# Logger:          SwiftOSLogger 1.0.0
+# Logger:          SwiftOSLogger 1.1.0
 # Application:     MyApp
 # Bundle ID:       com.acme.myapp
 # App Version:     2.3.1 (145)
