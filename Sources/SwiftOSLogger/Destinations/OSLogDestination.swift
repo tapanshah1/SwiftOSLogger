@@ -41,11 +41,16 @@ public struct OSLogDestination: LogDestination {
 
 /// One `os.Logger` per subsystem/category pair.
 final class OSLoggerCache: @unchecked Sendable {
+    private struct Key: Hashable {
+        let subsystem: String
+        let category: String
+    }
+
     private let lock = Lock()
-    private var loggers: [String: Logger] = [:]
+    private var loggers: [Key: Logger] = [:]
 
     func logger(subsystem: String, category: String) -> Logger {
-        let key = "\(subsystem)|\(category)"
+        let key = Key(subsystem: subsystem, category: category)
         return lock.withLock {
             if let logger = loggers[key] { return logger }
             let logger = Logger(subsystem: subsystem, category: category)

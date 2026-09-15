@@ -14,9 +14,9 @@ public protocol Loggable {
 }
 
 public extension Loggable {
-    static var logCategory: String { String(describing: Self.self) }
+    static var logCategory: String { TypeNameCache.name(of: Self.self) }
     static var baseLogger: OSLogger { .shared }
 
-    static var log: OSLogger { baseLogger.withCategory(logCategory).bound(to: Self.self) }
+    static var log: OSLogger { baseLogger.derived(category: logCategory, boundTo: Self.self) }
     var log: OSLogger { Self.log }
 }

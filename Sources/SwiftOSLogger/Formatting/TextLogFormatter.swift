@@ -50,36 +50,69 @@ public struct TextLogFormatter: LogFormatter {
     public static let osLogDefault = TextLogFormatter(includeDate: false, includeLevel: false, includeCategory: false)
 
     public func format(_ entry: LogEntry) -> String {
-        var segments: [String] = []
+        // Built in one pre-sized string; segments are separated by " ", then " - " and the message.
+        var line = ""
+        line.reserveCapacity(160 + entry.message.utf8.count)
+        var hasSegment = false
+
         if includeDate {
-            segments.append(DateFormatterCache.string(from: entry.date, format: dateFormat, timeZone: timeZone))
+            Self.beginSegment(&line, &hasSegment)
+            line.append(DateFormatterCache.string(from: entry.date, format: dateFormat, timeZone: timeZone))
         }
         if includeEmoji, !entry.level.emoji.isEmpty {
-            segments.append(entry.level.emoji)
+            Self.beginSegment(&line, &hasSegment)
+            line.append(entry.level.emoji)
         }
         if includeLevel {
-            segments.append("[\(entry.level.name)]")
+            Self.beginSegment(&line, &hasSegment)
+            line.append("[")
+            line.append(entry.level.name)
+            line.append("]")
         }
         if includeThread {
-            let id = "0x" + String(entry.threadID, radix: 16)
-            segments.append(entry.threadName.isEmpty ? "[\(id)]" : "[\(entry.threadName):\(id)]")
+            Self.beginSegment(&line, &hasSegment)
+            line.append("[")
+            if !entry.threadName.isEmpty {
+                line.append(entry.threadName)
+                line.append(":")
+            }
+            line.append("0x")
+            line.append(String(entry.threadID, radix: 16))
+            line.append("]")
         }
         if includeSubsystem {
-            segments.append("[\(entry.subsystem)]")
+            Self.beginSegment(&line, &hasSegment)
+            line.append("[")
+            line.append(entry.subsystem)
+            line.append("]")
         }
         if includeCategory {
-            segments.append("[\(entry.category)]")
+            Self.beginSegment(&line, &hasSegment)
+            line.append("[")
+            line.append(entry.category)
+            line.append("]")
         }
         if includeFileAndLine {
-            segments.append("\(entry.fileName):\(entry.line)")
+            Self.beginSegment(&line, &hasSegment)
+            line.append(entry.fileName)
+            line.append(":")
+            line.append(String(entry.line))
         }
-        switch (includeClassName, includeFunction) {
-        case (true, true): segments.append("\(entry.className).\(entry.function)")
-        case (true, false): segments.append(entry.className)
-        case (false, true): segments.append(entry.function)
-        case (false, false): break
+        if includeClassName || includeFunction {
+            Self.beginSegment(&line, &hasSegment)
+            if includeClassName { line.append(entry.className) }
+            if includeClassName && includeFunction { line.append(".") }
+            if includeFunction { line.append(entry.function) }
         }
-        guard !segments.isEmpty else { return entry.message }
-        return segments.joined(separator: " ") + " - " + entry.message
+        guard hasSegment else { return entry.message }
+        line.append(" - ")
+        line.append(entry.message)
+        return line
+    }
+
+    @inline(__always)
+    private static func beginSegment(_ line: inout String, _ hasSegment: inout Bool) {
+        if hasSegment { line.append(" ") }
+        hasSegment = true
     }
 }

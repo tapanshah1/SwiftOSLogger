@@ -15,10 +15,12 @@ enum ThreadInfo {
     /// current dispatch queue label, otherwise `""`.
     static var currentThreadName: String {
         if isMainThread { return "main" }
-        var buffer = [CChar](repeating: 0, count: 128)
-        if pthread_getname_np(pthread_self(), &buffer, buffer.count) == 0, buffer[0] != 0 {
-            return String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        let pthreadName = withUnsafeTemporaryAllocation(of: CChar.self, capacity: 64) { buffer -> String? in
+            guard let base = buffer.baseAddress,
+                  pthread_getname_np(pthread_self(), base, buffer.count) == 0, base.pointee != 0
+            else { return nil }
+            return String(cString: base)
         }
-        return String(cString: __dispatch_queue_get_label(nil))
+        return pthreadName ?? String(cString: __dispatch_queue_get_label(nil))
     }
 }

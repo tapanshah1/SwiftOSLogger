@@ -61,7 +61,12 @@ public final class OSLogger: @unchecked Sendable {
 
     /// A logger whose entries report `type` as their class name. Shares this logger's configuration.
     public func bound(to type: Any.Type) -> OSLogger {
-        OSLogger(subsystem: subsystem, category: category, boundTypeName: String(describing: type), storage: storage)
+        OSLogger(subsystem: subsystem, category: category, boundTypeName: TypeNameCache.name(of: type), storage: storage)
+    }
+
+    /// `withCategory(category).bound(to: type)` in one allocation (used by `Loggable`).
+    func derived(category: String, boundTo type: Any.Type) -> OSLogger {
+        OSLogger(subsystem: subsystem, category: category, boundTypeName: TypeNameCache.name(of: type), storage: storage)
     }
 
     // MARK: Logging
@@ -80,12 +85,14 @@ public final class OSLogger: @unchecked Sendable {
         line: Int = #line
     ) {
         let config = configuration
-        guard level < .off, level >= config.minLevel else { return }
-        let destinations = config.destinations.filter { level >= $0.minLevel }
-        guard !destinations.isEmpty else { return }
+        guard level < .off, level >= config.minLevel,
+              config.destinations.contains(where: { level >= $0.minLevel })
+        else { return }
 
-        let fileName = fileID.split(separator: "/").last.map(String.init) ?? fileID
-        let className = type.map { String(describing: $0) }
+        // Scan UTF-8 bytes: `lastIndex(of:)` on the String itself walks grapheme clusters.
+        let fileName = fileID.utf8.lastIndex(of: UInt8(ascii: "/"))
+            .map { String(fileID[fileID.utf8.index(after: $0)...]) } ?? fileID
+        let className = type.map { TypeNameCache.name(of: $0) }
             ?? boundTypeName
             ?? (fileName.hasSuffix(".swift") ? String(fileName.dropLast(".swift".count)) : fileName)
 
@@ -104,9 +111,9 @@ public final class OSLogger: @unchecked Sendable {
             threadID: ThreadInfo.currentThreadID,
             threadName: ThreadInfo.currentThreadName,
             isMainThread: ThreadInfo.isMainThread,
-            processID: ProcessInfo.processInfo.processIdentifier
+            processID: getpid()
         )
-        for destination in destinations {
+        for destination in config.destinations where level >= destination.minLevel {
             destination.write(entry, formatted: destination.formatter.format(entry))
         }
     }
