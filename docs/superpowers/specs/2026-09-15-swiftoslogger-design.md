@@ -1,7 +1,7 @@
 # SwiftOSLogger — Design Spec
 
 **Date:** 2026-09-15
-**Status:** Approved design, pending spec review
+**Status:** Implemented
 
 ## 1. Purpose
 
@@ -36,7 +36,7 @@ Every entry carries rich call-site metadata: date/time with milliseconds, level,
 - Module / product name: **`SwiftOSLogger`** (`import SwiftOSLogger`).
 - Minimum platforms: iOS 15, macOS 12, tvOS 15, watchOS 8, visionOS 1.
 - `swift-tools-version: 5.9`; no third-party dependencies. Strict concurrency checking enabled for the target.
-- Library product is `.library(name: "SwiftOSLogger", targets: ["SwiftOSLogger"])` (automatic linkage) plus a `SwiftOSLoggerDynamic` product with `type: .dynamic` used by the XCFramework script.
+- Library product is `.library(name: "SwiftOSLogger", targets: ["SwiftOSLogger"])` (automatic linkage). An earlier design added a second `SwiftOSLoggerDynamic` product for the XCFramework script; it was dropped because an SPM dynamic product archives as `SwiftOSLoggerDynamic.framework`, which doesn't match the module name. The script instead archives the normal `SwiftOSLogger` scheme and assembles a static framework itself (see §10).
 
 ### Layout
 
@@ -47,7 +47,7 @@ Sources/SwiftOSLogger/
   Destinations/ LogDestination.swift, OSLogDestination.swift, ConsoleDestination.swift, FileDestination.swift
   Formatting/   LogFormatter.swift, TextLogFormatter.swift, JSONLogFormatter.swift
   File/         FileDestinationConfiguration.swift, LogFileManager.swift, LogFileHeader.swift
-  Support/      ThreadInfo.swift, AppInfo.swift, Lock.swift, Version.swift
+  Support/      ThreadInfo.swift, AppInfo.swift, Lock.swift, Version.swift, DateFormatterCache.swift
 Tests/SwiftOSLoggerTests/
 scripts/build-xcframework.sh
 README.md
@@ -132,9 +132,10 @@ public struct LoggerConfiguration: Sendable {
 ```swift
 public protocol Loggable {
     static var logCategory: String { get }          // default: String(describing: Self.self)
+    static var baseLogger: OSLogger { get }         // default: .shared
 }
 public extension Loggable {
-    static var log: OSLogger { get }   // OSLogger.shared.withCategory(logCategory).bound(to: Self.self)
+    static var log: OSLogger { get }   // baseLogger.withCategory(logCategory).bound(to: Self.self)
     var log: OSLogger { get }
 }
 ```
@@ -230,7 +231,7 @@ public extension LogDestination { func flush() {} }
 
 ### 6.3 `FileDestination`
 
-`init(configuration: FileDestinationConfiguration = .init(), minLevel: LogLevel = .trace, formatter: any LogFormatter = TextLogFormatter(), onInternalError: (@Sendable (Error) -> Void)? = nil) throws`. It throws only if the directory cannot be created.
+`init(configuration: FileDestinationConfiguration = .init(), minLevel: LogLevel = .trace, formatter: any LogFormatter = TextLogFormatter(), onInternalError: (@Sendable (Error) -> Void)? = nil) throws`. It throws only if the directory cannot be created, with a `FileDestinationError` defined in `LogFileManager.swift`.
 
 ```swift
 public struct FileDestinationConfiguration: Sendable {
@@ -257,7 +258,7 @@ Also exposed as a static helper on `FileDestination`: `static func logFileURLs(i
 
 Internal type, used only from the destination's private serial `DispatchQueue`.
 
-**File naming:** `<prefix>_yyyy-MM-dd_HH-mm-ss-SSS.<ext>`, using the device's current time zone and the `en_US_POSIX` locale. If the name already exists (same millisecond), `_1`, `_2`, … is appended. Files are listed by filtering the directory for `<prefix>_*.<ext>` and sorting by name (lexicographic == chronological), with ties broken by creation date.
+**File naming:** `<prefix>_yyyy-MM-dd_HH-mm-ss-SSS.<ext>`, using UTC and the `en_US_POSIX` locale, so name order stays chronological across time zone and DST changes. (The header's `File Created` line stays in local time.) If the name already exists (same millisecond), `_1`, `_2`, … is appended. Files are listed by filtering the directory for `<prefix>_*.<ext>` and sorting by name (lexicographic == chronological), with ties broken by creation date.
 
 **Opening at startup:**
 - If `newFilePerLaunch == false` and a latest file exists and is under both limits, append to it. Current size comes from file attributes. The current line count comes from a single chunked scan counting `\n`. No header is written.
@@ -322,14 +323,15 @@ Sources:
   1. reports the error through the destination's `onInternalError` callback (once per distinct failure kind);
   2. emits one `os.Logger` fault under subsystem `SwiftOSLogger`, category `Internal`;
   3. tries to create a new file on the next write. If that also fails, the destination disables itself for the rest of the process.
+- The failure counter behind step 3 resets only after a successful append; a successful `flush()` with nothing to write does not reset it, so it can't hide a destination that is still failing.
 - `FileDestination.init` throws `FileDestinationError.cannotCreateDirectory(URL, underlying:)`.
 
 ## 10. XCFramework build
 
 `scripts/build-xcframework.sh [platforms...]`:
-- Default platforms: `ios ios-simulator macos tvos tvos-simulator watchos watchos-simulator visionos visionos-simulator`.
-- For each platform, run `xcodebuild archive -scheme SwiftOSLoggerDynamic -destination "generic/platform=<X>" -archivePath build/<X> SKIP_INSTALL=NO BUILD_LIBRARY_FOR_DISTRIBUTION=YES`.
-- Locate the produced `SwiftOSLogger.framework`, and copy `.swiftmodule` / `.swiftinterface` files into `Modules/` if the SPM archive did not embed them.
+- Default platforms: `ios ios-simulator maccatalyst macos tvos tvos-simulator watchos watchos-simulator visionos visionos-simulator`.
+- For each platform, run `xcodebuild archive -scheme SwiftOSLogger -destination "generic/platform=<X>" -archivePath build/<X> SKIP_INSTALL=NO BUILD_LIBRARY_FOR_DISTRIBUTION=YES`.
+- Build a static `SwiftOSLogger.framework` from the archived `SwiftOSLogger.o` with `libtool -static`, and copy only the `.swiftinterface` / `.swiftdoc` / `.abi.json` files into `Modules/` (so any compiler version can import the module). macOS and Mac Catalyst slices use a versioned (`Versions/A`) bundle.
 - Run `xcodebuild -create-xcframework -framework ... -output build/SwiftOSLogger.xcframework`, then zip it and print its SHA-256 checksum (for a `binaryTarget`).
 - Platforms whose SDK or runtime is missing are skipped with a warning, not a failure.
 
