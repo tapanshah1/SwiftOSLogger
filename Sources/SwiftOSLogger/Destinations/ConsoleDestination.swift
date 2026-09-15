@@ -24,8 +24,10 @@ public struct ConsoleDestination: LogDestination {
     ) {
         let writer: @Sendable (Data) -> Void
         switch output {
-        case .standardOutput: writer = { FileHandle.standardOutput.write($0) }
-        case .standardError: writer = { FileHandle.standardError.write($0) }
+        // The throwing `write(contentsOf:)`: `write(_:)` raises an Objective-C exception,
+        // which crashes the process, when the stream is closed.
+        case .standardOutput: writer = { try? FileHandle.standardOutput.write(contentsOf: $0) }
+        case .standardError: writer = { try? FileHandle.standardError.write(contentsOf: $0) }
         }
         self.init(minLevel: minLevel, formatter: formatter, output: output, writer: writer)
     }
