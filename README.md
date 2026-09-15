@@ -41,6 +41,8 @@ scripts/build-xcframework.sh ios ios-simulator      # only some platforms
 
 The script also writes `build/SwiftOSLogger.xcframework.zip` and prints its checksum, for use in a `.binaryTarget`.
 
+The XCFramework is static: in your target's **Frameworks, Libraries, and Embedded Content**, set it to **Do Not Embed**.
+
 ## Quick start
 
 ```swift
@@ -81,9 +83,15 @@ Swift has no `#class`. Adopt `Loggable` to get a `log` property that records you
 ```swift
 final class NetworkManager: Loggable {
     func fetch() {
-        log.debug("Fetching")   // [NetworkManager] NetworkManager.swift:3 NetworkManager.fetch() - Fetching
+        log.debug("Fetching")
     }
 }
+```
+
+With `ConsoleDestination()` this prints:
+
+```
+2026-09-15 13:45:12.347 +0530 🐞 [DEBUG] [main:0x1a2b] [NetworkManager] NetworkManager.swift:3 NetworkManager.fetch() - Fetching
 ```
 
 Override `static var logCategory` to change the category, or `static var baseLogger` to derive from a logger other than `OSLogger.shared`. Without `Loggable`, the class name is the file name, or whatever you pass as `type:`:
@@ -139,7 +147,9 @@ OSLogDestination(minLevel: .trace, privacy: .public)   // .public, .private or .
 
 Its default formatter leaves out the date, level and category, because unified logging records those already.
 
-> **Privacy note:** privacy applies to the whole message. The framework passes `os.Logger` a finished `String`, not an interpolation literal, so per-value privacy markers are not possible.
+> **Privacy note:** the default privacy is `.public`, so message text is visible in Console.app, `log stream` and sysdiagnoses. Use `.private` (or `.auto`) if messages may contain sensitive data.
+>
+> Privacy applies to the whole message. The framework passes `os.Logger` a finished `String`, not an interpolation literal, so per-value privacy markers are not possible.
 
 ### `ConsoleDestination`
 
@@ -156,7 +166,7 @@ ConsoleDestination(minLevel: .debug, output: .standardError)
 ```swift
 let files = try FileDestination(
     configuration: FileDestinationConfiguration(
-        directory: FileDestinationConfiguration.defaultDirectory,  // <Caches>/Logs
+        directory: FileDestinationConfiguration.defaultDirectory,  // <Caches>/<bundle ID or process name>/Logs
         fileNamePrefix: "log",
         fileExtension: "log",
         maxFileSize: 5 * 1024 * 1024,     // nil = unlimited
@@ -177,7 +187,13 @@ let files = try FileDestination(
 
 **Rotation.** A new file is started before an entry would push the current file past `maxFileSize`, or once the file holds `maxLinesPerFile` entries (header lines don't count). An entry larger than `maxFileSize` still gets written, into its own file. After a new file is created, the oldest files are deleted until at most `maxFileCount` remain. The current file is never deleted.
 
+`maxLinesPerFile` counts entries, not lines. When the app relaunches and appends to an existing file, the count is rebuilt by counting lines in the file, so multi-line messages make it approximate.
+
 **File names** are `<prefix>_yyyy-MM-dd_HH-mm-ss-SSS.<extension>` in UTC, so sorting by name sorts from oldest to newest.
+
+**One destination per folder.** Never point two `FileDestination`s, in the same process or in different ones, at the same `directory` with the same `fileNamePrefix`. They would write into each other's files and delete each other's files under `maxFileCount`. The default directory includes the bundle ID (or process name), so separate apps don't share it.
+
+**Buffering.** Entries are kept in memory until `bufferSize` bytes are buffered, an entry at or above `flushLevel` arrives, or `flush()` is called. Apps also flush when they move to the background or terminate. Command-line tools and other processes without a UIKit/AppKit app lifecycle get no such notification: call `flush()` (or `OSLogger.shared.flush()`) before exiting, or the last buffered entries are lost.
 
 **Header.** Each new file starts with:
 
@@ -208,7 +224,7 @@ files.deleteAllLogFiles()
 OSLogger.shared.flush()                 // flush every destination, e.g. before a crash report
 ```
 
-**Errors.** Logging never throws. If a file write fails, the error goes to `onInternalError` and the destination retries with a new file. If the retry fails too, file logging turns itself off for the rest of the run. `init` throws only when the log directory cannot be created.
+**Errors.** Logging never throws. If creating or writing a log file fails, the error goes to `onInternalError`, the entries still in the buffer are dropped, and the next entry starts a new file. If another failure happens before any buffered entries have reached disk again, file logging turns itself off for the rest of the run. `onInternalError` is called once per kind of error, asynchronously on a background queue, so it may call back into the destination (for example `flush()` or `logFileURLs()`). `init` throws only when the log directory cannot be created.
 
 > iOS may clear `Caches` when the device is low on storage. If your logs must survive that, use a folder under Application Support.
 
@@ -249,11 +265,16 @@ final class InMemoryDestination: LogDestination, @unchecked Sendable {
     let minLevel: LogLevel = .warning
     let formatter: any LogFormatter = TextLogFormatter(includeThread: false)
     private let lock = NSLock()
-    private(set) var lines: [String] = []
+    private var storage: [String] = []
+
+    var lines: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return storage
+    }
 
     func write(_ entry: LogEntry, formatted: String) {
         lock.lock(); defer { lock.unlock() }
-        lines.append(formatted)
+        storage.append(formatted)
     }
 }
 ```

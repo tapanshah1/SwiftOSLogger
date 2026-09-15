@@ -114,6 +114,7 @@ public final class OSLogger: @unchecked Sendable {   // all mutable state lock-p
 ```
 
 - `configuration` is a value type; reads take a snapshot under the lock.
+- `configure` is atomic: writers (`configure` and the `configuration` setter) are serialized by a separate update lock. `configure` copies the value out, runs `update` without the value lock held, then stores the result, so `update` may log and read `configuration` (both see the value from before the update). Calling `configure` or setting `configuration` on the same storage from inside `update` is not allowed.
 - Loggers made by `withCategory` / `bound(to:)` share the parent's configuration storage, so `configure` on either affects both.
 - If `level < configuration.minLevel`, or every destination filters it out, the message autoclosure is **not** evaluated.
 
@@ -190,7 +191,7 @@ Default output:
 ```
 
 Options (all `var`, all default on unless noted):
-- `dateFormat: String = "yyyy-MM-dd HH:mm:ss.SSS Z"`, `timeZone: TimeZone = .current`, `locale = en_US_POSIX`
+- `dateFormat: String = "yyyy-MM-dd HH:mm:ss.SSS Z"`, `timeZone: TimeZone = .current` (there is no locale option: dates are always formatted with the `en_US_POSIX` locale)
 - `includeDate`, `includeLevel`, `includeThread`, `includeCategory`, `includeFileAndLine`, `includeFunction` (`Bool`)
 - `includeClassName: Bool`: when true, the function is printed as `ClassName.function`
 - `includeSubsystem: Bool = false`, `includeEmoji: Bool = false`
@@ -226,16 +227,16 @@ public extension LogDestination { func flush() {} }
 ### 6.2 `ConsoleDestination`
 
 - `init(minLevel: LogLevel = .trace, formatter: any LogFormatter = TextLogFormatter(includeEmoji: true), output: Output = .standardOutput)`, where `Output` is `.standardOutput` or `.standardError`.
-- Writes `formatted + "\n"` with `FileHandle.standardOutput/standardError.write`, serialized by a lock so lines never interleave.
+- Writes `formatted + "\n"` with the throwing `FileHandle.standardOutput/standardError.write(contentsOf:)` (errors ignored, so a closed stream can't crash the process), serialized by a lock so lines never interleave.
 - README warns that `OSLogDestination` output already shows in the Xcode console, so enabling both duplicates lines in Xcode.
 
 ### 6.3 `FileDestination`
 
-`init(configuration: FileDestinationConfiguration = .init(), minLevel: LogLevel = .trace, formatter: any LogFormatter = TextLogFormatter(), onInternalError: (@Sendable (Error) -> Void)? = nil) throws`. It throws only if the directory cannot be created, with a `FileDestinationError` defined in `LogFileManager.swift`.
+`init(configuration: FileDestinationConfiguration = .init(), minLevel: LogLevel = .trace, formatter: any LogFormatter = TextLogFormatter(), onInternalError: (@Sendable (Error) -> Void)? = nil) throws`. It throws only if the directory cannot be created, with a `FileDestinationError` defined in `LogFileManager.swift`. `onInternalError` is called asynchronously on a background (`.utility`) global queue, so a handler may call back into the destination (`flush()`, `logFileURLs()`, …) without deadlocking its private queue.
 
 ```swift
 public struct FileDestinationConfiguration: Sendable {
-    public var directory: URL                      // default: <Caches>/Logs
+    public var directory: URL                      // default: <Caches>/<bundle ID ?? process name>/Logs
     public var fileNamePrefix: String = "log"
     public var fileExtension: String = "log"
     public var maxFileSize: Int? = 5 * 1024 * 1024 // bytes; nil = unlimited
@@ -254,17 +255,19 @@ Public helpers on `FileDestination`: `currentLogFileURL: URL?`, `logFileURLs() -
 
 Also exposed as a static helper on `FileDestination`: `static func logFileURLs(in directory: URL, prefix: String, extension: String) -> [URL]`.
 
+The default directory includes `Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName`, because unsandboxed macOS apps and command-line tools share `~/Library/Caches`; a shared `<Caches>/Logs` would let processes append into and delete each other's files. Two `FileDestination`s must never use the same directory and file name prefix.
+
 ## 7. File management and rotation (`LogFileManager`)
 
 Internal type, used only from the destination's private serial `DispatchQueue`.
 
-**File naming:** `<prefix>_yyyy-MM-dd_HH-mm-ss-SSS.<ext>`, using UTC and the `en_US_POSIX` locale, so name order stays chronological across time zone and DST changes. (The header's `File Created` line stays in local time.) If the name already exists (same millisecond), `_1`, `_2`, … is appended. Files are listed by filtering the directory for `<prefix>_*.<ext>` and sorting by name (lexicographic == chronological), with ties broken by creation date.
+**File naming:** `<prefix>_yyyy-MM-dd_HH-mm-ss-SSS.<ext>`, using UTC and the `en_US_POSIX` locale, so name order stays chronological across time zone and DST changes. (The header's `File Created` line stays in local time.) If the name already exists (same millisecond), `_1`, `_2`, … is appended. Files are listed by filtering the directory for `<prefix>_<date>_<time>[_<N>].<ext>` and sorting by the timestamp part of the name (lexicographic == chronological), with ties broken by the numeric `_N` sequence suffix (no suffix counts as 0).
 
 **Opening at startup:**
-- If `newFilePerLaunch == false` and a latest file exists and is under both limits, append to it. Current size comes from file attributes. The current line count comes from a single chunked scan counting `\n`. No header is written.
+- If `newFilePerLaunch == false` and a latest file exists and is under both limits, append to it. The current size and line count both come from a single chunked read of the file: the size is the number of bytes read, and the line count is the number of `\n`-terminated lines after the leading `#` header lines. No header is written.
 - Otherwise, create a new file.
 
-**Creating a file:** create the file, write the header (if `includeHeader`), set counters to the header's bytes/lines, then enforce `maxFileCount`.
+**Creating a file:** recreate the directory if it was deleted while running (errors ignored), create the file, write the header (if `includeHeader`), set counters to the header's bytes/lines, then enforce `maxFileCount`.
 
 **Rotation rule (checked per line, when the line is appended to the buffer):** before appending a formatted line of `b` bytes (including `\n`):
 - rotate if `maxFileSize != nil && currentBodyLines > 0 && currentSize + b > maxFileSize`
@@ -281,7 +284,7 @@ A single line larger than `maxFileSize` is still written, into a fresh file, so 
 **Lifecycle flush:** when `flushOnAppLifecycle` is true, observe:
 - UIKit (iOS/tvOS/visionOS): `didEnterBackgroundNotification`, `willTerminateNotification`
 - AppKit (macOS): `willTerminateNotification`
-- WatchKit (watchOS): `WKApplication.didEnterBackgroundNotification` when available, otherwise skipped
+- WatchKit (watchOS): `WKExtension.applicationDidEnterBackgroundNotification`
 
 The flush is `queue.sync`.
 
@@ -312,18 +315,18 @@ Sources:
 - **App version:** `CFBundleShortVersionString` and `CFBundleVersion`.
 - **Process name and PID:** `ProcessInfo.processInfo`.
 - **OS:** platform name plus `operatingSystemVersionString` / `operatingSystemVersion`.
-- **Device model:** `sysctlbyname("hw.machine")`, or `SIMULATOR_MODEL_IDENTIFIER` on the simulator.
+- **Device model:** `sysctlbyname("hw.model")` on macOS and Mac Catalyst (e.g. `MacBookPro18,1`), `sysctlbyname("hw.machine")` elsewhere (e.g. `iPhone16,2`). On the simulator, `SIMULATOR_MODEL_IDENTIFIER` followed by ` (Simulator)`.
 - **File Index:** a 1-based counter of files created by this `FileDestination` instance during the current process (the first file it creates is 1).
 
 ## 9. Concurrency and error handling
 
-- `OSLogger` protects its configuration box with an internal `Lock` (an `os_unfair_lock` wrapper allocated on the heap). `OSAllocatedUnfairLock` is iOS 16+, so it is not used.
-- Destinations must be `Sendable`. `FileDestination` confines all file state to its private serial queue and marks itself `@unchecked Sendable`. Writes are `queue.async`; `flush()` is `queue.sync`.
+- `OSLogger` protects its configuration box with internal `Lock`s (`os_unfair_lock` wrappers allocated on the heap): a value lock held only to copy the value in or out, and an update lock that serializes writers (see §4.2). `OSAllocatedUnfairLock` is iOS 16+, so it is not used.
+- Destinations must be `Sendable`. `FileDestination` confines all file state to its private serial queue (QoS `.utility`) and marks itself `@unchecked Sendable`. Writes are `queue.async`; `flush()` is `queue.sync`.
 - **No throws or crashes from `log`.** When a file destination hits an I/O error, it:
-  1. reports the error through the destination's `onInternalError` callback (once per distinct failure kind);
+  1. reports the error through the destination's `onInternalError` callback (once per distinct failure kind), dispatched asynchronously to a background global queue;
   2. emits one `os.Logger` fault under subsystem `SwiftOSLogger`, category `Internal`;
-  3. tries to create a new file on the next write. If that also fails, the destination disables itself for the rest of the process.
-- The failure counter behind step 3 resets only after a successful append; a successful `flush()` with nothing to write does not reset it, so it can't hide a destination that is still failing.
+  3. drops the buffered bytes and creates a new file on the next write. If another failure happens before any buffered bytes have reached disk, the destination disables itself for the rest of the process.
+- The failure counter behind step 3 resets only when bytes actually reach disk: `LogFileManager.append` and `flush` return `true` only when they wrote a non-empty buffer (directly, or while rotating). An append that only buffers, creating a file and writing its header, or a `flush()` with nothing to write does not reset it, so none of them can hide a destination that is still failing (for example when every buffer write fails but creating a new file still succeeds).
 - `FileDestination.init` throws `FileDestinationError.cannotCreateDirectory(URL, underlying:)`.
 
 ## 10. XCFramework build
@@ -345,6 +348,7 @@ XCTest target `SwiftOSLoggerTests`, run with `swift test` on macOS. Uses a temp 
   - autoclosure not evaluated when filtered
   - per-destination min level
   - `withCategory` / `bound(to:)` share configuration
+  - a `configure` closure may log and read `configuration`
   - `Loggable` category and class name
   - class name resolution order
   - metadata correctness (file name, line, function, main-thread flag, thread ID non-zero)
@@ -359,6 +363,7 @@ XCTest target `SwiftOSLoggerTests`, run with `swift test` on macOS. Uses a temp 
   - buffering plus `flush()` makes content visible
   - `flushLevel` triggers immediate write
   - `logFileURLs` ordering, `deleteAllLogFiles`
+  - error policy: repeated create failures disable the destination; persistent write failures disable it even with buffered appends (and an empty `flush()`) in between; `onInternalError` may call back into the destination
 - **Concurrency:** 10 threads × 1,000 entries into a file destination with rotation. The total body lines across files equals 10,000 (with `maxFileCount` nil), and there are no interleaved or partial lines.
 - **Build verification:** `swift build`, `swift test`, `xcodebuild build -scheme SwiftOSLogger -destination 'generic/platform=iOS Simulator'`.
 
