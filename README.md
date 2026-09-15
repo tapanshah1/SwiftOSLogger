@@ -15,6 +15,23 @@ A logging framework for Apple platforms built on Apple's unified logging system 
 - Thread-safe; file I/O runs on a background queue
 - iOS 15+, macOS 12+, tvOS 15+, watchOS 8+, visionOS 1+
 
+## Requirements
+
+| Requirement | Minimum |
+|-------------|---------|
+| iOS / iPadOS | 15.0 |
+| macOS | 12.0 (Mac Catalyst 15.0) |
+| tvOS | 15.0 |
+| watchOS | 8.0 |
+| visionOS | 1.0 |
+| Swift | 5.9 |
+| Xcode | 15.0 |
+| Dependencies | None |
+
+The Swift and Xcode minimums come from the package's `swift-tools-version: 5.9`. The package is built and tested with Xcode 26 and Swift 6.2, and the library compiles without warnings in both Swift 5 and Swift 6 language modes.
+
+Building the XCFramework with `scripts/build-xcframework.sh` also needs Xcode's platform components (Xcode › Settings › Components) for every platform you want a slice for. Platforms that aren't installed are skipped.
+
 ## Installation
 
 ### Swift Package Manager
