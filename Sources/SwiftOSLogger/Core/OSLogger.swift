@@ -1,0 +1,155 @@
+import Foundation
+
+/// The main entry point for logging.
+///
+/// ```swift
+/// let log = OSLogger(subsystem: "com.acme.app", category: "Network")
+/// log.info("Request started")
+/// ```
+public final class OSLogger: @unchecked Sendable {
+    /// A process-wide logger using the main bundle identifier as subsystem.
+    public static let shared = OSLogger()
+
+    public let subsystem: String
+    public let category: String
+    private let boundTypeName: String?
+    private let storage: ConfigurationStorage
+
+    public convenience init(
+        subsystem: String = Bundle.main.bundleIdentifier ?? "SwiftOSLogger",
+        category: String = "Default",
+        configuration: LoggerConfiguration = LoggerConfiguration()
+    ) {
+        self.init(subsystem: subsystem, category: category, boundTypeName: nil,
+                  storage: ConfigurationStorage(configuration))
+    }
+
+    private init(subsystem: String, category: String, boundTypeName: String?, storage: ConfigurationStorage) {
+        self.subsystem = subsystem
+        self.category = category
+        self.boundTypeName = boundTypeName
+        self.storage = storage
+    }
+
+    // MARK: Configuration
+
+    /// A snapshot of the current configuration. Setting it replaces the configuration
+    /// for this logger and every logger derived from it.
+    public var configuration: LoggerConfiguration {
+        get { storage.lock.withLock { storage.value } }
+        set { storage.lock.withLock { storage.value = newValue } }
+    }
+
+    /// Atomically updates the configuration. Do not log from inside `update`.
+    public func configure(_ update: (inout LoggerConfiguration) -> Void) {
+        storage.lock.withLock { update(&storage.value) }
+    }
+
+    /// A logger with a different category that shares this logger's configuration.
+    public func withCategory(_ category: String) -> OSLogger {
+        OSLogger(subsystem: subsystem, category: category, boundTypeName: boundTypeName, storage: storage)
+    }
+
+    /// A logger whose entries report `type` as their class name. Shares this logger's configuration.
+    public func bound(to type: Any.Type) -> OSLogger {
+        OSLogger(subsystem: subsystem, category: category, boundTypeName: String(describing: type), storage: storage)
+    }
+
+    // MARK: Logging
+
+    /// Logs `message` at `level`. The message is only evaluated if at least one
+    /// destination accepts the level.
+    ///
+    /// - Parameter type: Overrides the class name recorded for this entry.
+    public func log(
+        _ level: LogLevel,
+        _ message: @autoclosure () -> String,
+        type: Any.Type? = nil,
+        fileID: String = #fileID,
+        file: String = #filePath,
+        function: String = #function,
+        line: Int = #line
+    ) {
+        let config = configuration
+        guard level < .off, level >= config.minLevel else { return }
+        let destinations = config.destinations.filter { level >= $0.minLevel }
+        guard !destinations.isEmpty else { return }
+
+        let fileName = fileID.split(separator: "/").last.map(String.init) ?? fileID
+        let className = type.map { String(describing: $0) }
+            ?? boundTypeName
+            ?? (fileName.hasSuffix(".swift") ? String(fileName.dropLast(".swift".count)) : fileName)
+
+        let entry = LogEntry(
+            level: level,
+            message: message(),
+            date: Date(),
+            subsystem: subsystem,
+            category: category,
+            fileID: fileID,
+            fileName: fileName,
+            filePath: file,
+            className: className,
+            function: function,
+            line: line,
+            threadID: ThreadInfo.currentThreadID,
+            threadName: ThreadInfo.currentThreadName,
+            isMainThread: ThreadInfo.isMainThread,
+            processID: ProcessInfo.processInfo.processIdentifier
+        )
+        for destination in destinations {
+            destination.write(entry, formatted: destination.formatter.format(entry))
+        }
+    }
+
+    public func trace(_ message: @autoclosure () -> String, type: Any.Type? = nil,
+                      fileID: String = #fileID, file: String = #filePath, function: String = #function, line: Int = #line) {
+        log(.trace, message(), type: type, fileID: fileID, file: file, function: function, line: line)
+    }
+
+    public func debug(_ message: @autoclosure () -> String, type: Any.Type? = nil,
+                      fileID: String = #fileID, file: String = #filePath, function: String = #function, line: Int = #line) {
+        log(.debug, message(), type: type, fileID: fileID, file: file, function: function, line: line)
+    }
+
+    public func info(_ message: @autoclosure () -> String, type: Any.Type? = nil,
+                     fileID: String = #fileID, file: String = #filePath, function: String = #function, line: Int = #line) {
+        log(.info, message(), type: type, fileID: fileID, file: file, function: function, line: line)
+    }
+
+    public func notice(_ message: @autoclosure () -> String, type: Any.Type? = nil,
+                       fileID: String = #fileID, file: String = #filePath, function: String = #function, line: Int = #line) {
+        log(.notice, message(), type: type, fileID: fileID, file: file, function: function, line: line)
+    }
+
+    public func warning(_ message: @autoclosure () -> String, type: Any.Type? = nil,
+                        fileID: String = #fileID, file: String = #filePath, function: String = #function, line: Int = #line) {
+        log(.warning, message(), type: type, fileID: fileID, file: file, function: function, line: line)
+    }
+
+    public func error(_ message: @autoclosure () -> String, type: Any.Type? = nil,
+                      fileID: String = #fileID, file: String = #filePath, function: String = #function, line: Int = #line) {
+        log(.error, message(), type: type, fileID: fileID, file: file, function: function, line: line)
+    }
+
+    public func critical(_ message: @autoclosure () -> String, type: Any.Type? = nil,
+                         fileID: String = #fileID, file: String = #filePath, function: String = #function, line: Int = #line) {
+        log(.critical, message(), type: type, fileID: fileID, file: file, function: function, line: line)
+    }
+
+    /// Flushes every destination. Blocks until buffered output is written.
+    public func flush() {
+        for destination in configuration.destinations {
+            destination.flush()
+        }
+    }
+}
+
+private final class ConfigurationStorage: @unchecked Sendable {
+    let lock = Lock()
+    var value: LoggerConfiguration
+
+    init(_ value: LoggerConfiguration) {
+        self.value = value
+    }
+}
