@@ -157,6 +157,24 @@ final class OSLoggerTests: XCTestCase {
         XCTAssertEqual(logger.configuration.minLevel, .error)
     }
 
+    func testConfigureClosureCanLogAndReadConfiguration() {
+        let memory = MemoryDestination()
+        let logger = makeLogger(destinations: [memory])
+        let child = logger.withCategory("Child")
+
+        logger.configure { configuration in
+            logger.info("inside configure")
+            child.debug("child inside configure")
+            XCTAssertEqual(logger.configuration.minLevel, .trace)   // the value before this update
+            configuration.minLevel = .warning
+        }
+
+        XCTAssertEqual(logger.configuration.minLevel, .warning)
+        logger.info("filtered after configure")
+        XCTAssertEqual(memory.lines.map { $0.components(separatedBy: " - ").last! },
+                       ["inside configure", "child inside configure"])
+    }
+
     func testFlushFlushesEveryDestination() {
         let a = MemoryDestination()
         let b = MemoryDestination()

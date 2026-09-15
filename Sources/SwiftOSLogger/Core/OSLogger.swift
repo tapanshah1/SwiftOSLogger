@@ -36,13 +36,22 @@ public final class OSLogger: @unchecked Sendable {
     /// A snapshot of the current configuration. Setting it replaces the configuration
     /// for this logger and every logger derived from it.
     public var configuration: LoggerConfiguration {
-        get { storage.lock.withLock { storage.value } }
-        set { storage.lock.withLock { storage.value = newValue } }
+        get { storage.valueLock.withLock { storage.value } }
+        set { storage.updateLock.withLock { storage.valueLock.withLock { storage.value = newValue } } }
     }
 
-    /// Atomically updates the configuration. Do not log from inside `update`.
+    /// Atomically updates the configuration: concurrent `configure` calls and setters of
+    /// `configuration` never lose each other's changes.
+    ///
+    /// `update` may log and read `configuration`; both see the configuration from before
+    /// this update. Do not call `configure` or set `configuration` on this logger, or on a
+    /// logger derived from it, from inside `update`.
     public func configure(_ update: (inout LoggerConfiguration) -> Void) {
-        storage.lock.withLock { update(&storage.value) }
+        storage.updateLock.withLock {
+            var value = storage.valueLock.withLock { storage.value }
+            update(&value)
+            storage.valueLock.withLock { storage.value = value }
+        }
     }
 
     /// A logger with a different category that shares this logger's configuration.
@@ -146,7 +155,11 @@ public final class OSLogger: @unchecked Sendable {
 }
 
 private final class ConfigurationStorage: @unchecked Sendable {
-    let lock = Lock()
+    /// Guards `value`. Held only for the copy in or out, never while user code runs.
+    let valueLock = Lock()
+    /// Serializes writers (`configure` and the `configuration` setter), so an update can run
+    /// its closure without `valueLock` held and still not lose a concurrent change.
+    let updateLock = Lock()
     var value: LoggerConfiguration
 
     init(_ value: LoggerConfiguration) {
