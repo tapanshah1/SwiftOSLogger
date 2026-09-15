@@ -246,6 +246,7 @@ public struct FileDestinationConfiguration: Sendable {
     public var includeHeader: Bool = true
     public var customHeaderFields: [String: String] = [:]   // written sorted by key
     public var bufferSize: Int = 32 * 1024         // bytes buffered before a disk write
+    public var maxPendingBytes: Int? = 4 * 1024 * 1024 // cap on entries waiting for the queue; nil = unlimited
     public var flushLevel: LogLevel = .error       // entries >= this flush immediately
     public var flushOnAppLifecycle: Bool = true
 }
@@ -278,6 +279,8 @@ Here `currentBodyLines` counts log lines only, excluding header lines, so `maxLi
 A single line larger than `maxFileSize` is still written, into a fresh file, so the file stays at one entry and nothing is dropped. Rotation closes the current handle (after flushing) and creates a new file.
 
 **Max file count:** after creating a file, if the matching file count exceeds `maxFileCount`, delete the oldest until count == `maxFileCount`. The current file is never deleted.
+
+**Pending entries and the drop policy (in `FileDestination`):** `write` never schedules one queue block per entry. It adds the formatted line to a lock-protected pending list and schedules a single drain on the serial queue only if none is scheduled; the drain takes the whole list, appends each line to the `LogFileManager`, and repeats until the list is empty. The list is capped at `maxPendingBytes` (UTF-8 bytes plus one newline per entry): an entry that would exceed the cap is dropped and counted, except that an entry is always accepted when the list is empty. After writing a batch that had drops, the drain appends `# SwiftOSLogger dropped <N> entries: more than <maxPendingBytes> bytes were waiting to be written`. `flush()`, `currentLogFileURL` and `logFileURLs()` drain the list first; `deleteAllLogFiles()` discards it. A disabled destination still drains (and discards) so waiting memory is released. Peak memory for waiting entries is therefore about `maxPendingBytes` for the list being filled plus the batch being written.
 
 **Buffering:** formatted lines go to an in-memory buffer on the serial queue. Rotation checks are done per line at append time (counters track the buffered bytes, not just bytes on disk). The buffer is written when it reaches `bufferSize`, when an entry `>= flushLevel` arrives, on `flush()`, on rotation, and on app lifecycle events.
 
@@ -321,7 +324,7 @@ Sources:
 ## 9. Concurrency and error handling
 
 - `OSLogger` protects its configuration box with internal `Lock`s (`os_unfair_lock` wrappers allocated on the heap): a value lock held only to copy the value in or out, and an update lock that serializes writers (see §4.2). `OSAllocatedUnfairLock` is iOS 16+, so it is not used.
-- Destinations must be `Sendable`. `FileDestination` confines all file state to its private serial queue (QoS `.utility`) and marks itself `@unchecked Sendable`. Writes are `queue.async`; `flush()` is `queue.sync`.
+- Destinations must be `Sendable`. `FileDestination` confines all file state to its private serial queue (QoS `.utility`) and marks itself `@unchecked Sendable`. Writes add to a pending list guarded by a `Lock` and schedule at most one `queue.async` drain at a time (§7); `flush()` is `queue.sync`. Logging never waits for the disk: under sustained overload entries are dropped rather than growing memory.
 - **No throws or crashes from `log`.** When a file destination hits an I/O error, it:
   1. reports the error through the destination's `onInternalError` callback (once per distinct failure kind), dispatched asynchronously to a background global queue;
   2. emits one `os.Logger` fault under subsystem `SwiftOSLogger`, category `Internal`;

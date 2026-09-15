@@ -27,6 +27,11 @@ public struct FileDestinationConfiguration: Sendable {
     public var customHeaderFields: [String: String]
     /// Bytes buffered in memory before they are written to disk.
     public var bufferSize: Int
+    /// Most bytes of formatted entries that may wait for the background writer. When logging
+    /// outpaces the disk, entries beyond this limit are dropped (never blocking the caller) and
+    /// a `# SwiftOSLogger dropped N entries` line is written once the writer catches up.
+    /// An entry is always accepted when nothing is waiting. `nil` = unlimited.
+    public var maxPendingBytes: Int?
     /// Entries at or above this level are written to disk immediately.
     public var flushLevel: LogLevel
     /// Flush when the app moves to the background or terminates.
@@ -43,6 +48,7 @@ public struct FileDestinationConfiguration: Sendable {
         includeHeader: Bool = true,
         customHeaderFields: [String: String] = [:],
         bufferSize: Int = 32 * 1024,
+        maxPendingBytes: Int? = 4 * 1024 * 1024,
         flushLevel: LogLevel = .error,
         flushOnAppLifecycle: Bool = true
     ) {
@@ -56,6 +62,7 @@ public struct FileDestinationConfiguration: Sendable {
         self.includeHeader = includeHeader
         self.customHeaderFields = customHeaderFields
         self.bufferSize = bufferSize
+        self.maxPendingBytes = maxPendingBytes
         self.flushLevel = flushLevel
         self.flushOnAppLifecycle = flushOnAppLifecycle
     }

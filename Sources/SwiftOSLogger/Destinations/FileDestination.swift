@@ -16,6 +16,10 @@ import WatchKit
 /// blocks on disk I/O. Entries at or above `configuration.flushLevel` are written
 /// immediately; call `flush()` before reading files.
 ///
+/// Memory is bounded: at most `configuration.maxPendingBytes` of entries wait for the queue.
+/// When logging outpaces the disk, further entries are dropped and counted, and a
+/// `# SwiftOSLogger dropped N entries` line is written once the writer catches up.
+///
 /// Errors never reach the caller of `log`. An I/O failure is reported through
 /// `onInternalError`, the buffered entries are dropped and the next entry starts a new file.
 /// If another failure happens before any buffered bytes have reached disk again, the
@@ -34,6 +38,10 @@ public final class FileDestination: LogDestination, @unchecked Sendable {
     private var consecutiveFailures = 0
     private var isDisabled = false
     private var reportedErrors = Set<String>()
+
+    // Entries waiting for `queue`. Guarded by `pendingLock`.
+    private let pendingLock = Lock()
+    private var pending = PendingEntries()
 
     // Written only in init/deinit.
     private var observers: [NSObjectProtocol] = []
@@ -77,15 +85,18 @@ public final class FileDestination: LogDestination, @unchecked Sendable {
 
     public func write(_ entry: LogEntry, formatted: String) {
         let flushImmediately = entry.level >= configuration.flushLevel
-        queue.async { [self] in
-            guard !isDisabled else { return }
-            perform { try manager.append(formatted, flushImmediately: flushImmediately) }
+        let needsDrain = pendingLock.withLock {
+            pending.add(formatted, flushImmediately: flushImmediately, maxBytes: configuration.maxPendingBytes)
+        }
+        if needsDrain {
+            queue.async { [self] in drainPending() }
         }
     }
 
     /// Blocks until buffered entries are written to disk.
     public func flush() {
         queue.sync {
+            drainPending()
             guard !isDisabled else { return }
             perform { try manager.flush() }
         }
@@ -95,20 +106,28 @@ public final class FileDestination: LogDestination, @unchecked Sendable {
 
     /// The file currently being written to, or `nil` before the first entry.
     public var currentLogFileURL: URL? {
-        queue.sync { manager.currentFileURL }
+        queue.sync {
+            drainPending()
+            return manager.currentFileURL
+        }
     }
 
     /// All log files for this configuration, oldest first. Flushes first.
     public func logFileURLs() -> [URL] {
         queue.sync {
+            drainPending()
             if !isDisabled { perform { try manager.flush() } }
             return manager.logFileURLs()
         }
     }
 
-    /// Deletes every log file for this configuration. The next entry starts a new file.
+    /// Deletes every log file for this configuration, including entries not yet written.
+    /// The next entry starts a new file.
     public func deleteAllLogFiles() {
-        queue.sync { manager.deleteAllLogFiles() }
+        queue.sync {
+            _ = pendingLock.withLock { pending.takeAll() }
+            manager.deleteAllLogFiles()
+        }
     }
 
     /// Log files for `prefix`/`fileExtension` in `directory`, oldest first.
@@ -117,6 +136,24 @@ public final class FileDestination: LogDestination, @unchecked Sendable {
     }
 
     // MARK: Private
+
+    /// Writes every waiting entry, then the dropped-entries notice if any were dropped.
+    /// Runs on `queue` until nothing is waiting.
+    private func drainPending() {
+        while let batch = pendingLock.withLock({ pending.takeAll() }) {
+            guard !isDisabled else { continue }   // keep draining so waiting memory is released
+            for (index, line) in batch.lines.enumerated() {
+                let isLast = index == batch.lines.count - 1 && batch.droppedCount == 0
+                perform { try manager.append(line, flushImmediately: batch.flushImmediately && isLast) }
+                if isDisabled { break }
+            }
+            if batch.droppedCount > 0, !isDisabled, let maxBytes = configuration.maxPendingBytes {
+                let notice = "# SwiftOSLogger dropped \(batch.droppedCount) entries: "
+                    + "more than \(maxBytes) bytes were waiting to be written"
+                perform { try manager.append(notice, flushImmediately: batch.flushImmediately) }
+            }
+        }
+    }
 
     /// Runs a file operation on `queue`, applying the retry-then-disable error policy.
     ///
@@ -165,5 +202,50 @@ public final class FileDestination: LogDestination, @unchecked Sendable {
                 self?.flush()
             }
         }
+    }
+}
+
+/// Formatted entries waiting for `FileDestination`'s queue, capped by byte count.
+private struct PendingEntries {
+    struct Batch {
+        let lines: [String]
+        let flushImmediately: Bool
+        let droppedCount: Int
+    }
+
+    private var lines: [String] = []
+    private var bytes = 0
+    private var flushImmediately = false
+    private var droppedCount = 0
+    private var drainScheduled = false
+
+    /// Adds `line` unless waiting entries would exceed `maxBytes` (it is then dropped and counted).
+    /// - Returns: `true` if the caller must schedule a drain.
+    mutating func add(_ line: String, flushImmediately: Bool, maxBytes: Int?) -> Bool {
+        let size = line.utf8.count + 1
+        if let maxBytes, !lines.isEmpty, bytes + size > maxBytes {
+            droppedCount += 1
+        } else {
+            lines.append(line)
+            bytes += size
+            self.flushImmediately = self.flushImmediately || flushImmediately
+        }
+        guard !drainScheduled else { return false }
+        drainScheduled = true
+        return true
+    }
+
+    /// Takes everything waiting, or returns `nil` (and clears the scheduled flag) when empty.
+    mutating func takeAll() -> Batch? {
+        guard !lines.isEmpty || droppedCount > 0 else {
+            drainScheduled = false
+            return nil
+        }
+        let batch = Batch(lines: lines, flushImmediately: flushImmediately, droppedCount: droppedCount)
+        lines = []
+        bytes = 0
+        flushImmediately = false
+        droppedCount = 0
+        return batch
     }
 }

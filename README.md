@@ -176,12 +176,13 @@ let files = try FileDestination(
         includeHeader: true,
         customHeaderFields: ["Environment": "staging"],
         bufferSize: 32 * 1024,
+        maxPendingBytes: 4 * 1024 * 1024, // memory cap for entries waiting to be written; nil = unlimited
         flushLevel: .error,               // entries >= .error are written immediately
         flushOnAppLifecycle: true         // flush on background / terminate
     ),
     minLevel: .debug,
     formatter: JSONLogFormatter(),
-    onInternalError: { error in print("File logging failed: \(error)") }
+    onInternalError: { [weak self] error in self?.report(error) }   // capture weakly: see Memory
 )
 ```
 
@@ -194,6 +195,14 @@ let files = try FileDestination(
 **One destination per folder.** Never point two `FileDestination`s, in the same process or in different ones, at the same `directory` with the same `fileNamePrefix`. They would write into each other's files and delete each other's files under `maxFileCount`. The default directory includes the bundle ID (or process name), so separate apps don't share it.
 
 **Buffering.** Entries are kept in memory until `bufferSize` bytes are buffered, an entry at or above `flushLevel` arrives, or `flush()` is called. Apps also flush when they move to the background or terminate. Command-line tools and other processes without a UIKit/AppKit app lifecycle get no such notification: call `flush()` (or `OSLogger.shared.flush()`) before exiting, or the last buffered entries are lost.
+
+**Memory and dropped entries.** Logging never waits for the disk. Entries wait in memory for a background writer, up to `maxPendingBytes` (4 MB by default). If your app logs faster than the writer can keep up, for example in a tight loop on several threads, new entries are dropped instead of using more memory. When the writer catches up it writes a line like:
+
+```
+# SwiftOSLogger dropped 1532 entries: more than 4194304 bytes were waiting to be written
+```
+
+A single entry is always accepted when nothing else is waiting, however large it is. Set `maxPendingBytes: nil` to never drop entries, at the cost of unbounded memory during a log storm.
 
 **Header.** Each new file starts with:
 
@@ -227,6 +236,13 @@ OSLogger.shared.flush()                 // flush every destination, e.g. before 
 **Errors.** Logging never throws. If creating or writing a log file fails, the error goes to `onInternalError`, the entries still in the buffer are dropped, and the next entry starts a new file. If another failure happens before any buffered entries have reached disk again, file logging turns itself off for the rest of the run. `onInternalError` is called once per kind of error, asynchronously on a background queue, so it may call back into the destination (for example `flush()` or `logFileURLs()`). `init` throws only when the log directory cannot be created.
 
 > iOS may clear `Caches` when the device is low on storage. If your logs must survive that, use a folder under Application Support.
+
+## Memory
+
+- **Capture weakly in `onInternalError`.** The destination keeps its handler alive. If the handler captures an object that owns the destination (or the logger using it), neither is ever freed. Use `[weak self]`.
+- **Use a fixed set of categories.** `OSLogDestination` keeps one `os.Logger` per subsystem and category for the life of the destination. Names like `withCategory("Network")` are fine; names built from IDs, like `withCategory("request-\(id)")`, grow that cache without limit.
+- **Removing a destination frees it.** Once no logger's configuration refers to it, a `FileDestination` finishes writing any waiting entries, closes its file and is released.
+- **Waiting entries are capped.** See *Memory and dropped entries* under `FileDestination`.
 
 ## Formatters
 

@@ -41,6 +41,7 @@ final class FileDestinationTests: XCTestCase {
         XCTAssertFalse(defaults.newFilePerLaunch)
         XCTAssertTrue(defaults.includeHeader)
         XCTAssertEqual(defaults.bufferSize, 32 * 1024)
+        XCTAssertEqual(defaults.maxPendingBytes, 4 * 1024 * 1024)
         XCTAssertEqual(defaults.flushLevel, .error)
         XCTAssertTrue(defaults.flushOnAppLifecycle)
     }
@@ -176,6 +177,55 @@ final class FileDestinationTests: XCTestCase {
 
         destination.write(makeEntry(), formatted: "fails")
         wait(for: [calledBack], timeout: 5)
+    }
+
+    func testEntriesBeyondPendingLimitAreDroppedAndReported() throws {
+        let writeStarted = DispatchSemaphore(value: 0)
+        let releaseWrite = DispatchSemaphore(value: 0)
+        final class Once: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            func take() -> Bool { lock.lock(); defer { lock.unlock() }; defer { done = true }; return !done }
+        }
+        let firstWrite = Once()
+
+        // Each "entry-NN\n" is 9 bytes, so 45 pending bytes hold exactly 5 entries.
+        let configuration = FileDestinationConfiguration(directory: directory, maxFileSize: nil, maxFileCount: nil,
+                                                         bufferSize: 0, maxPendingBytes: 45, flushLevel: .critical,
+                                                         flushOnAppLifecycle: false)
+        let manager = try LogFileManager(configuration: configuration)
+        manager.writeData = { handle, data in
+            if firstWrite.take() {
+                writeStarted.signal()
+                releaseWrite.wait()   // stall the disk writer so entries pile up
+            }
+            try handle.write(contentsOf: data)
+        }
+        let destination = FileDestination(manager: manager)
+
+        destination.write(makeEntry(), formatted: "entry-00")
+        XCTAssertEqual(writeStarted.wait(timeout: .now() + 5), .success)
+        for i in 1...20 {
+            destination.write(makeEntry(), formatted: String(format: "entry-%02d", i))
+        }
+        releaseWrite.signal()
+        destination.flush()
+
+        let url = try XCTUnwrap(destination.currentLogFileURL)
+        XCTAssertEqual(try bodyLines(url), ["entry-00", "entry-01", "entry-02", "entry-03", "entry-04", "entry-05"])
+        let lines = try readLines(url)
+        XCTAssertEqual(lines.last, "# SwiftOSLogger dropped 15 entries: more than 45 bytes were waiting to be written")
+    }
+
+    func testSingleEntryLargerThanPendingLimitIsStillWritten() throws {
+        let configuration = FileDestinationConfiguration(directory: directory, maxPendingBytes: 10, flushOnAppLifecycle: false)
+        let destination = try FileDestination(configuration: configuration)
+        let large = String(repeating: "x", count: 50)
+
+        destination.write(makeEntry(), formatted: large)
+        destination.flush()
+
+        XCTAssertEqual(try bodyLines(XCTUnwrap(destination.currentLogFileURL)), [large])
     }
 
     func testConcurrentLoggingWithRotationKeepsEveryLineIntact() throws {
