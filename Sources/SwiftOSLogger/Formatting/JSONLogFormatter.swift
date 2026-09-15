@@ -28,7 +28,11 @@ public struct JSONLogFormatter: LogFormatter {
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]),
               let string = String(data: data, encoding: .utf8)
         else {
-            return "{\"level\":\"\(entry.level.name)\",\"message\":\"<unencodable>\"}"
+            // Unreachable with the current String/Int/Bool values; kept so `format` never fails.
+            let level = entry.level.name
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            return "{\"level\":\"\(level)\",\"message\":\"<unencodable>\"}"
         }
         return string
     }
