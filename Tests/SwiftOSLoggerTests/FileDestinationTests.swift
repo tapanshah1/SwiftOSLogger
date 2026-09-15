@@ -121,6 +121,63 @@ final class FileDestinationTests: XCTestCase {
         XCTAssertEqual(destination.logFileURLs(), [])
     }
 
+    func testPersistentWriteFailuresDisableDestinationDespiteBufferedAppends() throws {
+        final class Counter: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _value = 0
+            var value: Int { lock.lock(); defer { lock.unlock() }; return _value }
+            func increment() { lock.lock(); defer { lock.unlock() }; _value += 1 }
+        }
+        let writeAttempts = Counter()
+        let reported = expectation(description: "write error reported")
+        reported.assertForOverFulfill = false
+
+        // Each "entry-NN\n" is 9 bytes, so every 8th append fills the 64-byte buffer and writes.
+        let configuration = FileDestinationConfiguration(directory: directory, maxFileSize: nil, maxFileCount: nil,
+                                                         bufferSize: 64, flushLevel: .critical, flushOnAppLifecycle: false)
+        let manager = try LogFileManager(configuration: configuration)
+        manager.writeData = { _, _ in
+            writeAttempts.increment()
+            throw CocoaError(.fileWriteOutOfSpace)
+        }
+        let destination = FileDestination(manager: manager, onInternalError: { error in
+            if (error as? CocoaError)?.code == .fileWriteOutOfSpace { reported.fulfill() }
+        })
+
+        for i in 0..<8 {
+            destination.write(makeEntry(), formatted: String(format: "entry-%02d", i))
+        }
+        destination.flush()   // empty buffer after the first failure: must not reset the failure count
+        for i in 8..<100 {
+            destination.write(makeEntry(), formatted: String(format: "entry-%02d", i))
+        }
+        wait(for: [reported], timeout: 5)
+
+        XCTAssertNil(destination.currentLogFileURL, "destination should be disabled")
+        XCTAssertEqual(writeAttempts.value, 2)
+        destination.write(makeEntry(level: .critical), formatted: "ignored")
+        XCTAssertNil(destination.currentLogFileURL)
+        XCTAssertEqual(writeAttempts.value, 2)
+    }
+
+    func testErrorHandlerCanCallBackIntoDestination() throws {
+        final class Holder: @unchecked Sendable { weak var destination: FileDestination? }
+        let holder = Holder()
+        let calledBack = expectation(description: "handler called back into the destination")
+        calledBack.assertForOverFulfill = false
+        let destination = try FileDestination(configuration: makeConfiguration(), onInternalError: { _ in
+            holder.destination?.flush()
+            _ = holder.destination?.logFileURLs()
+            _ = holder.destination?.currentLogFileURL
+            calledBack.fulfill()
+        })
+        holder.destination = destination
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: directory.path)
+
+        destination.write(makeEntry(), formatted: "fails")
+        wait(for: [calledBack], timeout: 5)
+    }
+
     func testConcurrentLoggingWithRotationKeepsEveryLineIntact() throws {
         let destination = try FileDestination(configuration: makeConfiguration(maxFileSize: 16 * 1024))
         let logger = OSLogger(subsystem: "com.acme.app", category: "Stress",

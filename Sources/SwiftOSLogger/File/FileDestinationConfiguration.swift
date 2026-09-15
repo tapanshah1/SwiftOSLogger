@@ -3,8 +3,12 @@ import Foundation
 /// File naming, rotation and buffering options for `FileDestination`.
 public struct FileDestinationConfiguration: Sendable {
     /// Folder the log files are written to. Created if missing.
-    /// Default: `<Caches>/Logs`. Note that the system may purge Caches when storage is low;
-    /// use Application Support if logs must survive that.
+    /// Default: `<Caches>/<bundle identifier or process name>/Logs`. Note that the system may
+    /// purge Caches when storage is low; use Application Support if logs must survive that.
+    ///
+    /// Never point two `FileDestination`s (in one process or in different processes) at the
+    /// same directory with the same `fileNamePrefix`: they would write into and delete each
+    /// other's files.
     public var directory: URL
     /// File names are `<prefix>_yyyy-MM-dd_HH-mm-ss-SSS.<extension>`.
     public var fileNamePrefix: String
@@ -56,9 +60,12 @@ public struct FileDestinationConfiguration: Sendable {
         self.flushOnAppLifecycle = flushOnAppLifecycle
     }
 
-    /// `<Caches>/Logs`.
+    /// `<Caches>/<bundle identifier>/Logs`, or `<Caches>/<process name>/Logs` when there is no
+    /// bundle identifier (e.g. command-line tools). The per-app folder keeps unsandboxed macOS
+    /// processes, which share `~/Library/Caches`, from using each other's log files.
     public static var defaultDirectory: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName, isDirectory: true)
             .appendingPathComponent("Logs", isDirectory: true)
     }
 }

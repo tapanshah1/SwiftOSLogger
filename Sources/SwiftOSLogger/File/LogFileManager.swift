@@ -23,6 +23,11 @@ final class LogFileManager {
     private var filesCreated = 0
     private var hasOpenedFile = false
 
+    /// Writes buffered bytes to the current file. Test seam for injecting write failures.
+    var writeData: (FileHandle, Data) throws -> Void = { handle, data in
+        try handle.write(contentsOf: data)
+    }
+
     init(configuration: FileDestinationConfiguration, appInfo: AppInfo = .current) throws {
         self.configuration = configuration
         self.appInfo = appInfo
@@ -34,41 +39,51 @@ final class LogFileManager {
     }
 
     deinit {
-        try? close()
+        _ = try? close()
     }
 
     // MARK: Writing
 
     /// Buffers one log line, rotating first if it would exceed a limit.
-    func append(_ line: String, flushImmediately: Bool) throws {
+    /// - Returns: `true` if buffered bytes were written to disk (by a rotation or a buffer flush),
+    ///   `false` if the line was only buffered. Writing a new file's header does not count.
+    @discardableResult
+    func append(_ line: String, flushImmediately: Bool) throws -> Bool {
         let data = Data((line + "\n").utf8)
+        var wroteToDisk = false
         if currentFileURL == nil {
             try openInitialFile()
         } else if shouldRotate(adding: data.count) {
-            try createNewFile()
+            wroteToDisk = try createNewFile()
         }
         buffer.append(data)
         currentSize += data.count
         currentBodyLines += 1
         if flushImmediately || buffer.count >= configuration.bufferSize {
-            try flush()
+            wroteToDisk = try flush() || wroteToDisk
         }
+        return wroteToDisk
     }
 
-    func flush() throws {
-        guard !buffer.isEmpty, let handle else { return }
+    /// - Returns: `true` if a non-empty buffer was written to disk.
+    @discardableResult
+    func flush() throws -> Bool {
+        guard !buffer.isEmpty, let handle else { return false }
         defer { buffer.removeAll(keepingCapacity: true) }
-        try handle.write(contentsOf: buffer)
+        try writeData(handle, buffer)
+        return true
     }
 
-    func close() throws {
+    /// - Returns: `true` if a non-empty buffer was written to disk before closing.
+    @discardableResult
+    func close() throws -> Bool {
         let closingHandle = handle
         defer {
             handle = nil
             buffer.removeAll()
             try? closingHandle?.close()
         }
-        try flush()
+        return try flush()
     }
 
     /// Forgets the current file without flushing, so the next append creates a new file.
@@ -155,10 +170,15 @@ final class LogFileManager {
         return true
     }
 
-    private func createNewFile() throws {
+    /// - Returns: `true` if closing the previous file wrote buffered bytes to disk.
+    @discardableResult
+    private func createNewFile() throws -> Bool {
+        var wroteToDisk = false
         if handle != nil {
-            try close()
+            wroteToDisk = try close()
         }
+        // Recreate the directory in case it was deleted while running.
+        try? fileManager.createDirectory(at: configuration.directory, withIntermediateDirectories: true)
         let now = Date()
         let url = uniqueFileURL(for: now)
         filesCreated += 1
@@ -177,6 +197,7 @@ final class LogFileManager {
         currentSize = headerData.count
         currentBodyLines = 0
         deleteFilesOverLimit()
+        return wroteToDisk
     }
 
     private func uniqueFileURL(for date: Date) -> URL {
