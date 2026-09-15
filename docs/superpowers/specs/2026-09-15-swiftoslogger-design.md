@@ -47,7 +47,8 @@ Sources/SwiftOSLogger/
   Destinations/ LogDestination.swift, OSLogDestination.swift, ConsoleDestination.swift, FileDestination.swift
   Formatting/   LogFormatter.swift, TextLogFormatter.swift, JSONLogFormatter.swift
   File/         FileDestinationConfiguration.swift, LogFileManager.swift, LogFileHeader.swift
-  Support/      ThreadInfo.swift, AppInfo.swift, Lock.swift, Version.swift, DateFormatterCache.swift
+  Support/      ThreadInfo.swift, AppInfo.swift, Lock.swift, Version.swift, DateFormatterCache.swift,
+                FastDateFormat.swift, TypeNameCache.swift
 Tests/SwiftOSLoggerTests/
 scripts/build-xcframework.sh
 README.md
@@ -196,11 +197,15 @@ Options (all `var`, all default on unless noted):
 - `includeClassName: Bool`: when true, the function is printed as `ClassName.function`
 - `includeSubsystem: Bool = false`, `includeEmoji: Bool = false`
 
-Segments that are off are omitted with their separators. The thread segment is `name:0xID`, or just `0xID` when the name is empty. Date formatting uses a cached `DateFormatter` guarded by a lock.
+Segments that are off are omitted with their separators. The thread segment is `name:0xID`, or just `0xID` when the name is empty. The line is appended into one pre-sized `String`.
+
+**Date formatting** (`DateFormatterCache`, shared by both formatters, the header and file names): a pattern made only of `yyyy MM dd HH mm ss SSS Z XXXXX`, quoted literals and punctuation is parsed once and rendered by `FastDateFormat` with integer arithmetic (milliseconds rounded to nearest, as `DateFormatter` does), for instants from 1970 to 2100 in time zones with whole-minute offsets. Any other pattern or date falls back to a cached `en_US_POSIX` Gregorian `DateFormatter` under a lock. Tests check that the fast path is byte-identical to `DateFormatter` across patterns, time zones, DST transitions and millisecond edges.
 
 ### 5.2 `JSONLogFormatter`
 
 One JSON object per line (JSON Lines), keys sorted, no pretty-printing. Keys: `timestamp` (ISO-8601 with fractional seconds), `level`, `levelValue`, `message`, `subsystem`, `category`, `file`, `line`, `class`, `function`, `threadID`, `threadName`, `isMainThread`, `pid`.
+
+The object is written directly into a UTF-8 buffer, byte-identical to `JSONSerialization` with `.sortedKeys` and `.withoutEscapingSlashes`: `"` `\` and `\b \f \n \r \t` are backslash-escaped, other control characters become `\u00xx` (lowercase hex), and everything else, including `/`, DEL and non-ASCII, is written as-is.
 
 ## 6. Destinations
 
