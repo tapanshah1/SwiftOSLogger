@@ -36,14 +36,14 @@ Building the XCFramework with `scripts/build-xcframework.sh` also needs Xcode's 
 
 ### Swift Package Manager
 
-In Xcode choose **File › Add Package Dependencies…** and enter `https://github.com/tapanshah1/OSlogger.git`, or add it to `Package.swift`:
+In Xcode choose **File › Add Package Dependencies…** and enter `https://github.com/tapanshah1/SwiftOSLogger.git`, or add it to `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/tapanshah1/OSlogger.git", from: "1.1.0"),
+    .package(url: "https://github.com/tapanshah1/SwiftOSLogger.git", from: "1.1.0"),
 ],
 targets: [
-    .target(name: "MyApp", dependencies: [.product(name: "SwiftOSLogger", package: "OSlogger")]),
+    .target(name: "MyApp", dependencies: [.product(name: "SwiftOSLogger", package: "SwiftOSLogger")]),
 ]
 ```
 

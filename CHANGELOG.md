@@ -49,5 +49,5 @@ First release.
 - Swift Package Manager, plus `scripts/build-xcframework.sh` for a static XCFramework.
 - iOS 15+, macOS 12+, tvOS 15+, watchOS 8+, visionOS 1+. No dependencies.
 
-[1.1.0]: https://github.com/tapanshah1/OSlogger/compare/1.0.0...1.1.0
-[1.0.0]: https://github.com/tapanshah1/OSlogger/releases/tag/1.0.0
+[1.1.0]: https://github.com/tapanshah1/SwiftOSLogger/compare/1.0.0...1.1.0
+[1.0.0]: https://github.com/tapanshah1/SwiftOSLogger/releases/tag/1.0.0
