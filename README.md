@@ -60,6 +60,8 @@ The script also writes `build/SwiftOSLogger.xcframework.zip` and prints its chec
 
 The XCFramework is static: in your target's **Frameworks, Libraries, and Embedded Content**, set it to **Do Not Embed**.
 
+Each slice needs its platform installed in Xcode (Xcode › Settings › Components), and the visionOS simulator needs an Apple Silicon Mac; platforms that are missing are skipped with a warning. The prebuilt archive attached to a release therefore covers **iOS, iOS Simulator, Mac Catalyst and macOS**. For tvOS, watchOS or visionOS, either install those components and run the script yourself, or use Swift Package Manager, which builds from source on every supported platform.
+
 ## Quick start
 
 ```swift
